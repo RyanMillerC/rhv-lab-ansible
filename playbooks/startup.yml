@@ -1,0 +1,71 @@
+# First task must be done on bean.taco.moe because beef.taco.moe is not on the
+# network and Ansible will fail the playbook in an attempt to connect to it.
+- name: Boot the hypervisor
+  hosts: bean
+  tasks:
+    - name: Send wake-on-lan signal to hypervisor NIC
+      community.general.wakeonlan:
+        mac: "{{ hypervisor_mac_address }}"
+
+    # If we don't wait, the hosted-engine start command from the second play
+    # will fail because the RHV database isn't up yet.
+    - name: Wait 3 minutes for hypervisor to come up
+      pause:
+        minutes: 3
+
+- name: Start Lab Environment
+  hosts: beef
+  become: true
+  vars_files:
+    - ../vars.yml
+  tasks:
+    - name: Take RHV out of global maintenance mode
+      command:
+        cmd: hosted-engine --set-maintenance --mode=none
+
+    - name: Wait 10 seconds for RHV to come out of maintenance mode
+      pause:
+        seconds: 10
+
+    - name: Start RHV hosted engine
+      command:
+        cmd: hosted-engine --vm-start
+
+    - name: Wait 60 seconds for RHV hosted engine startup to complete
+      pause:
+        seconds: 60
+
+    - name: Log in to RHV
+      redhat.rhv.ovirt_auth:
+        url: "{{ engine_url | default(lookup('env','OVIRT_URL')) | default(omit) }}"
+        username: "{{ engine_user | default(lookup('env','OVIRT_USERNAME')) | default(omit) }}"
+        password: "{{ engine_password | default(lookup('env','OVIRT_PASSWORD')) | default(omit) }}"
+        ca_file: "{{ engine_cafile | default(lookup('env','OVIRT_CAFILE')) | default(omit) }}"
+        token: "{{ engine_token | default(lookup('env','OVIRT_TOKEN')) | default(omit) }}"
+        insecure: "{{ engine_insecure | default(true) }}"
+
+    - name: Get machines tagged with boot-on-lab-start
+      redhat.rhv.ovirt_vm_info:
+        auth: "{{ ovirt_auth }}"
+        pattern: tag=boot-on-lab-start
+      register: ovirt_vm_info
+
+    - name: Boot machines tagged with boot-on-lab-start
+      redhat.rhv.ovirt_vm:
+        auth: "{{ ovirt_auth }}"
+        state: running
+        name: "{{ item.name }}"
+        wait: true
+      async: 300
+      poll: 0
+      loop: "{{ ovirt_vm_info.ovirt_vms }}"
+      register: async_task
+
+    - name: Wait for VMs to come up
+      async_status:
+        jid: "{{ item.ansible_job_id }}"
+      register: job_result
+      until: job_result.finished
+      retries: 10
+      delay: 30
+      loop: "{{ async_task.results }}"

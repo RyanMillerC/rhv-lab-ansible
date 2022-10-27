@@ -1,0 +1,60 @@
+- name: Shutdown Lab Environment
+  hosts: beef
+  become: true
+  vars_files:
+    - ../vars.yml
+  tasks:
+    - name: Log in to RHV
+      redhat.rhv.ovirt_auth:
+        url: "{{ engine_url | default(lookup('env','OVIRT_URL')) | default(omit) }}"
+        username: "{{ engine_user | default(lookup('env','OVIRT_USERNAME')) | default(omit) }}"
+        password: "{{ engine_password | default(lookup('env','OVIRT_PASSWORD')) | default(omit) }}"
+        ca_file: "{{ engine_cafile | default(lookup('env','OVIRT_CAFILE')) | default(omit) }}"
+        token: "{{ engine_token | default(lookup('env','OVIRT_TOKEN')) | default(omit) }}"
+        insecure: "{{ engine_insecure | default(true) }}"
+
+    - name: Get all machines except HostedEngine
+      redhat.rhv.ovirt_vm_info:
+        auth: "{{ ovirt_auth }}"
+        pattern: 'name!=HostedEngine'
+      register: ovirt_vm_info
+
+    - name: Shutdown all machines except HostedEngine
+      redhat.rhv.ovirt_vm:
+        auth: "{{ ovirt_auth }}"
+        state: stopped
+        name: "{{ item.name }}"
+        wait: true
+      async: 300
+      poll: 0
+      loop: "{{ ovirt_vm_info.ovirt_vms }}"
+      register: async_task
+
+    - name: Wait for VMs to go down
+      async_status:
+        jid: "{{ item.ansible_job_id }}"
+      register: job_result
+      until: job_result.finished
+      retries: 10
+      delay: 30
+      when: item.ansible_job_id
+      loop: "{{ async_task.results }}"
+
+    - name: Put RHV into global maintenance mode
+      command:
+        cmd: hosted-engine --set-maintenance --mode=global
+
+    - name: Sleep for 10 seconds
+      pause:
+        seconds: 10
+
+    - name: Shutdown RHV hosted engine
+      command:
+        cmd: hosted-engine --vm-shutdown
+
+    - name: Wait 60 seconds RHV hosted engine for shutdown to complete
+      pause:
+        seconds: 60
+
+    - name: Shutdown host
+      community.general.shutdown:
